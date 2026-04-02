@@ -142,7 +142,7 @@ class GameRoom {
     this.processing   = false;
     this.lastActions  = [];  // 최근 액션 로그 (UI 표시용)
     this.gameMode     = 'multi'; // 'solo' | 'multi'
-    this.lastRaiserIdx = -1;  // 마지막 레이즈/베팅 플레이어 인덱스 (베팅 완료 판단용)
+    this.actedThisStreet = new Set(); // 이번 스트리트에서 액션한 플레이어 id 목록
   }
 
   // ── 플레이어 관리 ──────────────────────────────────────
@@ -279,8 +279,8 @@ class GameRoom {
 
     // UTG (BB 다음)부터 베팅 시작
     this.currentIdx = this._nextActiveIdx(bbIdx);
-    // 프리플랍: BB가 마지막 레이즈어 → BB 옵션(레이즈 권리) 보장
-    this.lastRaiserIdx = bbIdx;
+    // 프리플랍: actedThisStreet 초기화 (블라인드는 액션으로 안 침)
+    this.actedThisStreet = new Set();
 
     this._startTurnTimer();
     this._triggerAIIfNeeded();
@@ -365,7 +365,8 @@ class GameRoom {
         this.currentBet = p.bet;  // 새 기준액
         log.amount = actualPay;
         if (p.chips === 0) p.allIn = true;
-        this.lastRaiserIdx = pIdx;  // 레이즈: 기준점 갱신
+        // 레이즈 시 다른 모든 플레이어의 액션 기록 초기화 (다시 콜/레이즈 기회 줘야 함)
+        this.actedThisStreet = new Set([playerId]);
         break;
       }
 
@@ -377,7 +378,10 @@ class GameRoom {
         this.pot += pay;
         if (p.bet > this.currentBet) {
           this.currentBet = p.bet;
-          this.lastRaiserIdx = pIdx;  // 올인으로 베팅 올라가면 레이즈 취급
+          // 올인으로 베팅 올라가면 레이즈 취급 → 다른 플레이어 기회 초기화
+          this.actedThisStreet = new Set([playerId]);
+        } else {
+          this.actedThisStreet.add(playerId);
         }
         p.allIn = true;
         log.amount = pay;
@@ -387,6 +391,8 @@ class GameRoom {
       default: return { error: 'UNKNOWN_ACTION' };
     }
 
+    // 이번 액션을 기록 (raise/allin은 위에서 이미 처리)
+    this.actedThisStreet.add(playerId);
     this.lastActions.push(log);
     if (this.lastActions.length > 10) this.lastActions.shift();
 
@@ -430,24 +436,21 @@ class GameRoom {
     const active = this.players.filter(p => !p.folded && !p.allIn && p.connected);
     if (active.length <= 1) return true;
 
-    // ★ 올바른 베팅 완료 판단 (두 조건 모두 충족해야 함)
+    // ★ 올바른 베팅 완료 판단
     //
-    // 기존 버그: bet 금액만 비교 → 프리플랍에서 SB(25)/BB(50)가
-    // 블라인드로 낸 금액이 currentBet(50)과 우연히 맞아서
-    // 아직 아무도 액션 안 했는데 "완료"로 잘못 판단했음.
+    // 두 조건을 모두 만족해야 완료:
+    //   1) 모든 active 플레이어가 이번 스트리트에서 액션을 했다
+    //   2) 모든 active 플레이어의 bet이 currentBet과 같다
     //
-    // 해결: lastRaiserIdx를 추적해서
-    //   1) 모두 currentBet에 맞췄고
-    //   2) 다음 플레이어가 마지막 레이즈어와 같다 (= 한 바퀴 완전히 돌았다)
-    // 두 조건을 모두 만족할 때만 완료로 처리
+    // 이 방식은 폴드로 플레이어 수가 줄어들어도 정확하게 동작하고,
+    // 레이즈 시 actedThisStreet를 초기화해서 모두에게 다시 기회를 준다.
 
-    // 조건 1: 모두 currentBet에 맞췄는가?
-    const allCalled = active.every(p => p.bet === this.currentBet);
-    if (!allCalled) return false;
+    // 조건 1: 아직 액션 안 한 active 플레이어가 있으면 미완료
+    const allActed = active.every(p => this.actedThisStreet.has(p.id));
+    if (!allActed) return false;
 
-    // 조건 2: 한 바퀴를 완전히 돌았는가?
-    if (this.lastRaiserIdx === -1) return false;
-    return nextIdx === this.lastRaiserIdx;
+    // 조건 2: 모두 currentBet에 맞췄는가?
+    return active.every(p => p.bet === this.currentBet);
   }
 
   _nextStreet() {
@@ -468,8 +471,8 @@ class GameRoom {
     // 베팅 리셋
     this.players.forEach(p => { p.bet = 0; });
     this.currentBet = 0;
-    // 새 스트리트: SB 위치부터 다시 시작, 기준점 갱신
-    this.lastRaiserIdx = this._nextActiveIdx(this.dealerIdx);
+    // 새 스트리트: 액션 기록 초기화
+    this.actedThisStreet = new Set();
 
     switch (this.phase) {
       case 'preflop':
