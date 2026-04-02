@@ -394,16 +394,32 @@ class GameRoom {
       return;
     }
 
+    // ★ 버그 수정: 올인이 발생했을 때, 상대방이 아직 콜/폴드를 안 했으면
+    //   먼저 상대방에게 턴을 줘야 한다.
+    //   기존 코드는 canAct <= 1 이면 바로 _nextStreet()으로 넘겼는데,
+    //   이 경우 AI가 콜할 기회를 못 얻어 게임이 멈춰버림.
+
     // 아직 액션 가능한 플레이어 (폴드X, 올인X, 연결됨)
     const canAct = remaining.filter(p => !p.allIn);
-    if (canAct.length <= 1) {
-      // 올인 상황 — 나머지 카드 자동 공개
+
+    // 올인이 방금 발생했고 상대가 아직 currentBet에 못 맞춘 경우 → 상대에게 콜/폴드 기회 줌
+    const someoneNeedsToAct = canAct.some(p => p.bet < this.currentBet);
+    if (canAct.length >= 1 && someoneNeedsToAct) {
+      // 아직 콜/폴드 안 한 상대에게 턴 넘김
+      const nextIdx = this._nextActionIdx(this.currentIdx);
+      this.currentIdx = nextIdx;
+      this._startTurnTimer();
+      this._triggerAIIfNeeded();
+      return;
+    }
+
+    if (canAct.length === 0) {
+      // 모두 올인 → 나머지 카드 자동 공개
       this._nextStreet();
       return;
     }
 
-    // ★ 핵심 수정: 다음 액션 플레이어를 먼저 구하고,
-    //   그 플레이어가 이미 currentBet에 맞췄는지 확인
+    // 다음 액션 플레이어를 구하고, 베팅이 끝났는지 확인
     const nextIdx = this._nextActionIdx(this.currentIdx);
 
     if (this._isBettingComplete(nextIdx)) {
