@@ -140,8 +140,8 @@ function handleMessage(ws, msg) {
       const room = rooms.get(ctx.roomId);
       if (!room) return;
       room.enqueueAction(ctx.playerId, msg.action, msg.amount || 0);
-      // 액션 처리 후 상태 브로드캐스트
-      setTimeout(() => broadcastGameState(room), 50);
+      // ★ 큐 처리 완료 후 상태 전송 (100ms로 여유 확보)
+      setTimeout(() => broadcastGameState(room), 100);
       break;
     }
 
