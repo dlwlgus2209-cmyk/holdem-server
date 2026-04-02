@@ -142,6 +142,7 @@ class GameRoom {
     this.processing   = false;
     this.lastActions  = [];  // 최근 액션 로그 (UI 표시용)
     this.gameMode     = 'multi'; // 'solo' | 'multi'
+    this.lastRaiserIdx = -1;  // 마지막 레이즈/베팅 플레이어 인덱스 (베팅 완료 판단용)
   }
 
   // ── 플레이어 관리 ──────────────────────────────────────
@@ -278,6 +279,8 @@ class GameRoom {
 
     // UTG (BB 다음)부터 베팅 시작
     this.currentIdx = this._nextActiveIdx(bbIdx);
+    // 프리플랍: BB가 마지막 레이즈어 → BB 옵션(레이즈 권리) 보장
+    this.lastRaiserIdx = bbIdx;
 
     this._startTurnTimer();
     this._triggerAIIfNeeded();
@@ -362,6 +365,7 @@ class GameRoom {
         this.currentBet = p.bet;  // 새 기준액
         log.amount = actualPay;
         if (p.chips === 0) p.allIn = true;
+        this.lastRaiserIdx = pIdx;  // 레이즈: 기준점 갱신
         break;
       }
 
@@ -371,7 +375,10 @@ class GameRoom {
         p.bet  += pay;
         p.totalBet += pay;
         this.pot += pay;
-        if (p.bet > this.currentBet) this.currentBet = p.bet;
+        if (p.bet > this.currentBet) {
+          this.currentBet = p.bet;
+          this.lastRaiserIdx = pIdx;  // 올인으로 베팅 올라가면 레이즈 취급
+        }
         p.allIn = true;
         log.amount = pay;
         break;
@@ -390,28 +397,13 @@ class GameRoom {
     // 폴드 안 하고 연결된 플레이어 수 확인
     const remaining = this.players.filter(p => !p.folded && p.connected);
     if (remaining.length <= 1) {
-      this._nextStreet();
+      // 한 명만 남으면 바로 라운드 종료 (상대 폴드)
+      this._endRound(remaining);
       return;
     }
 
-    // ★ 버그 수정: 올인이 발생했을 때, 상대방이 아직 콜/폴드를 안 했으면
-    //   먼저 상대방에게 턴을 줘야 한다.
-    //   기존 코드는 canAct <= 1 이면 바로 _nextStreet()으로 넘겼는데,
-    //   이 경우 AI가 콜할 기회를 못 얻어 게임이 멈춰버림.
-
-    // 아직 액션 가능한 플레이어 (폴드X, 올인X, 연결됨)
+    // 액션 가능한 플레이어 (폴드X, 올인X, 연결됨)
     const canAct = remaining.filter(p => !p.allIn);
-
-    // 올인이 방금 발생했고 상대가 아직 currentBet에 못 맞춘 경우 → 상대에게 콜/폴드 기회 줌
-    const someoneNeedsToAct = canAct.some(p => p.bet < this.currentBet);
-    if (canAct.length >= 1 && someoneNeedsToAct) {
-      // 아직 콜/폴드 안 한 상대에게 턴 넘김
-      const nextIdx = this._nextActionIdx(this.currentIdx);
-      this.currentIdx = nextIdx;
-      this._startTurnTimer();
-      this._triggerAIIfNeeded();
-      return;
-    }
 
     if (canAct.length === 0) {
       // 모두 올인 → 나머지 카드 자동 공개
@@ -419,11 +411,11 @@ class GameRoom {
       return;
     }
 
-    // 다음 액션 플레이어를 구하고, 베팅이 끝났는지 확인
+    // 다음으로 액션할 플레이어
     const nextIdx = this._nextActionIdx(this.currentIdx);
 
     if (this._isBettingComplete(nextIdx)) {
-      // 모든 플레이어 베팅 완료 → 다음 스트리트
+      // 베팅 완료 → 다음 스트리트
       this._nextStreet();
     } else {
       // 아직 베팅 안 맞은 플레이어가 있음 → 턴 넘김
@@ -434,13 +426,28 @@ class GameRoom {
   }
 
   _isBettingComplete(nextIdx) {
-    // 액션 가능한 플레이어 목록
+    // 액션 가능한 플레이어 목록 (폴드X, 올인X, 연결됨)
     const active = this.players.filter(p => !p.folded && !p.allIn && p.connected);
     if (active.length <= 1) return true;
 
-    // 모두 currentBet에 맞췄는지 확인
-    // (nextIdx가 다시 처음으로 돌아왔다는 것 = 한 바퀴 완료)
-    return active.every(p => p.bet === this.currentBet);
+    // ★ 올바른 베팅 완료 판단 (두 조건 모두 충족해야 함)
+    //
+    // 기존 버그: bet 금액만 비교 → 프리플랍에서 SB(25)/BB(50)가
+    // 블라인드로 낸 금액이 currentBet(50)과 우연히 맞아서
+    // 아직 아무도 액션 안 했는데 "완료"로 잘못 판단했음.
+    //
+    // 해결: lastRaiserIdx를 추적해서
+    //   1) 모두 currentBet에 맞췄고
+    //   2) 다음 플레이어가 마지막 레이즈어와 같다 (= 한 바퀴 완전히 돌았다)
+    // 두 조건을 모두 만족할 때만 완료로 처리
+
+    // 조건 1: 모두 currentBet에 맞췄는가?
+    const allCalled = active.every(p => p.bet === this.currentBet);
+    if (!allCalled) return false;
+
+    // 조건 2: 한 바퀴를 완전히 돌았는가?
+    if (this.lastRaiserIdx === -1) return false;
+    return nextIdx === this.lastRaiserIdx;
   }
 
   _nextStreet() {
@@ -461,6 +468,8 @@ class GameRoom {
     // 베팅 리셋
     this.players.forEach(p => { p.bet = 0; });
     this.currentBet = 0;
+    // 새 스트리트: SB 위치부터 다시 시작, 기준점 갱신
+    this.lastRaiserIdx = this._nextActiveIdx(this.dealerIdx);
 
     switch (this.phase) {
       case 'preflop':
@@ -511,15 +520,10 @@ class GameRoom {
     }
 
     if (contestants.length === 1) {
-      // 나 혼자 남음 → 팟 전체 (상대방 폴드)
+      // 나 혼자 남음 → 팟 전체
       const winner = contestants[0];
       winner.chips += this.pot;
-      const payout = { player: winner, amount: this.pot, hand: null };
-      // allResults에 모든 참가자를 포함해야 결과창에 플레이어 목록이 표시됨
-      const allR = this.players
-        .filter(p => p.connected)
-        .map(p => ({ player: p, result: null }));
-      this._addRoundResult([payout], allR);
+      this._addRoundResult([{ player: winner, amount: this.pot, hand: null }]);
       return;
     }
 
@@ -558,10 +562,7 @@ class GameRoom {
     const alive = this.players.filter(p => p.connected && !p.folded);
     if (alive.length === 1) {
       alive[0].chips += this.pot;
-      const allR = this.players
-        .filter(p => p.connected)
-        .map(p => ({ player: p, result: null }));
-      this._addRoundResult([{ player: alive[0], amount: this.pot, hand: null }], allR);
+      this._addRoundResult([{ player: alive[0], amount: this.pot, hand: null }]);
       this.phase = 'showdown';
     }
   }
