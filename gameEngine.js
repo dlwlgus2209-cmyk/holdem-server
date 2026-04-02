@@ -511,10 +511,15 @@ class GameRoom {
     }
 
     if (contestants.length === 1) {
-      // 나 혼자 남음 → 팟 전체
+      // 나 혼자 남음 → 팟 전체 (상대방 폴드)
       const winner = contestants[0];
       winner.chips += this.pot;
-      this._addRoundResult([{ player: winner, amount: this.pot, hand: null }]);
+      const payout = { player: winner, amount: this.pot, hand: null };
+      // allResults에 모든 참가자를 포함해야 결과창에 플레이어 목록이 표시됨
+      const allR = this.players
+        .filter(p => p.connected)
+        .map(p => ({ player: p, result: null }));
+      this._addRoundResult([payout], allR);
       return;
     }
 
@@ -553,7 +558,10 @@ class GameRoom {
     const alive = this.players.filter(p => p.connected && !p.folded);
     if (alive.length === 1) {
       alive[0].chips += this.pot;
-      this._addRoundResult([{ player: alive[0], amount: this.pot, hand: null }]);
+      const allR = this.players
+        .filter(p => p.connected)
+        .map(p => ({ player: p, result: null }));
+      this._addRoundResult([{ player: alive[0], amount: this.pot, hand: null }], allR);
       this.phase = 'showdown';
     }
   }
