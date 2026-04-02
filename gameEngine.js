@@ -387,26 +387,43 @@ class GameRoom {
   }
 
   _advanceTurn() {
-    const activePlayers = this.players.filter(p => !p.folded && !p.allIn && p.connected);
+    // 폴드 안 하고 연결된 플레이어 수 확인
+    const remaining = this.players.filter(p => !p.folded && p.connected);
+    if (remaining.length <= 1) {
+      this._nextStreet();
+      return;
+    }
 
-    // 아직 베팅이 안 맞은 플레이어가 있는지 확인
-    const needsAction = activePlayers.find(p =>
-      p.bet < this.currentBet &&
-      this.players.indexOf(p) !== this.currentIdx
-    );
+    // 아직 액션 가능한 플레이어 (폴드X, 올인X, 연결됨)
+    const canAct = remaining.filter(p => !p.allIn);
+    if (canAct.length <= 1) {
+      // 올인 상황 — 나머지 카드 자동 공개
+      this._nextStreet();
+      return;
+    }
 
-    if (!needsAction && this._isBettingComplete()) {
+    // ★ 핵심 수정: 다음 액션 플레이어를 먼저 구하고,
+    //   그 플레이어가 이미 currentBet에 맞췄는지 확인
+    const nextIdx = this._nextActionIdx(this.currentIdx);
+
+    if (this._isBettingComplete(nextIdx)) {
+      // 모든 플레이어 베팅 완료 → 다음 스트리트
       this._nextStreet();
     } else {
-      this.currentIdx = this._nextActionIdx(this.currentIdx);
+      // 아직 베팅 안 맞은 플레이어가 있음 → 턴 넘김
+      this.currentIdx = nextIdx;
       this._startTurnTimer();
       this._triggerAIIfNeeded();
     }
   }
 
-  _isBettingComplete() {
+  _isBettingComplete(nextIdx) {
+    // 액션 가능한 플레이어 목록
     const active = this.players.filter(p => !p.folded && !p.allIn && p.connected);
     if (active.length <= 1) return true;
+
+    // 모두 currentBet에 맞췄는지 확인
+    // (nextIdx가 다시 처음으로 돌아왔다는 것 = 한 바퀴 완료)
     return active.every(p => p.bet === this.currentBet);
   }
 
@@ -464,10 +481,16 @@ class GameRoom {
 
   _endRound(contestants) {
     this._clearTurnTimer();
+
+    // ★ 이미 쇼다운이 처리됐으면 중복 실행 방지
+    if (this.phase === 'showdown' && this.lastRoundResult) return;
     this.phase = 'showdown';
 
+    // ★ 실제로 폴드 안 하고 연결된 사람만 contestants로 (방어 코드)
+    contestants = contestants.filter(p => !p.folded && p.connected);
+
     if (contestants.length === 0) {
-      // 전원 폴드 (이상 케이스)
+      // 전원 폴드 (이상 케이스) — pot 환불 없이 그냥 종료
       return;
     }
 
@@ -483,7 +506,7 @@ class GameRoom {
     const results = contestants.map(p => ({
       player: p,
       result: evaluateHand([...p.hand, ...this.community]),
-    })).sort((a,b) => compareHands(b.result, a.result));
+    })).sort((a, b) => compareHands(b.result, a.result));
 
     // 사이드팟 없는 단순 케이스
     const topResult = results[0].result;
@@ -491,7 +514,7 @@ class GameRoom {
     const share = Math.floor(this.pot / winners.length);
     const rem   = this.pot - share * winners.length;
 
-    const payouts = winners.map((w,i) => ({
+    const payouts = winners.map((w, i) => ({
       player: w.player,
       amount: share + (i === 0 ? rem : 0),
       hand:   w.result,
@@ -558,6 +581,8 @@ class GameRoom {
 
   _startTurnTimer() {
     this._clearTurnTimer();
+    // ★ 타이머 시작 시각을 기록해 클라이언트에 남은 시간 전달
+    this.turnStartedAt = Date.now();
     this.turnTimer = setTimeout(() => {
       const p = this.players[this.currentIdx];
       if (p && !p.folded && !p.allIn) {
@@ -570,6 +595,7 @@ class GameRoom {
 
   _clearTurnTimer() {
     if (this.turnTimer) { clearTimeout(this.turnTimer); this.turnTimer = null; }
+    this.turnStartedAt = null;
   }
 
   // ── 인덱스 유틸 ───────────────────────────────────────
@@ -636,7 +662,9 @@ class GameRoom {
       dealerIdx:   this.dealerIdx,
       myIdx,
       isMyTurn:    myIdx === this.currentIdx && !this.players[myIdx]?.folded,
-      turnTimeLeft: TURN_TIMEOUT / 1000,
+      turnTimeLeft: this.turnStartedAt
+        ? Math.max(0, Math.round((TURN_TIMEOUT - (Date.now() - this.turnStartedAt)) / 1000))
+        : TURN_TIMEOUT / 1000,
       players,
       lastActions: this.lastActions.slice(-5),
       roundNum:    this.roundNum,
